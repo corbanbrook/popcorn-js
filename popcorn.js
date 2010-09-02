@@ -3,12 +3,153 @@
 (function() {
   var Popcorn = this.Popcorn = {};
 
+  // Wrapper for accessing commands by name
+  // commands[name].create() returns a new command of type name
+  // Not sure if this is the best way; maybe it's too fancy?
+  // I liked it more than a switch, though
+  var commands = {
+    subtitle: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.SubtitleCommand(name, params, text, videoManager);
+      }
+    },
+    credits: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.CreditsCommand(name, params, text, videoManager);
+      }
+    },
+    flickr: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.FlickrCommand(name, params, text, videoManager);
+      }
+    },
+    videotag: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.TagCommand(name, params, text, videoManager);
+      }
+    },
+    location: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.MapCommand(name, params, text, videoManager);
+      }
+    },
+    footnote: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.FootnoteCommand(name, params, text, videoManager);
+      }
+    },
+    twitter: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.TwitterCommand(name, params, text, videoManager);
+      }
+    },
+    attribution: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.AttributionCommand(name, params, text, videoManager);
+      }
+    },
+    googlenews: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.GoogleNewsCommand(name, params, text, videoManager);
+      }
+    },
+    wiki: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.WikiCommand(name, params, text, videoManager);
+      }
+    },
+    lowerthird: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.LowerThirdCommand(name, params, text, videoManager);
+      }
+    },
+    seek: {
+      create: function(name, params, text, videoManager) {
+        return new Popcorn.SeekCommand(name, params, text, videoManager);
+      }
+    }
+  };
+
+  ////////////////////////////////////////////////////////////////////////////
+  // XML Parser
+  ////////////////////////////////////////////////////////////////////////////
+
+  // Loads an external xml file, and returns the xml object
+  function loadXMLDoc(name) {
+    var xhttp = new XMLHttpRequest();
+    if (xhttp) {
+      xhttp.open("GET", name, false);
+      xhttp.send();
+      return xhttp.responseXML;
+    } else {
+      return false;
+    }
+  }
+
   // The video manager manages a single video element, and all it's commands.
   Popcorn.VideoManager = function(videoElement) {
-    this.commandObjects  = {};
-    this.manifestObjects = {};
-    this.videoElement = videoElement;
+    var self = this; // lock 'this' for use with eventListeners, etc
+
+    this.videoElement     = videoElement;
+    this.isLoaded         = false;
+    this.commandObjects   = {};
+    this.manifestObjects  = {};
+    this.xmlDoc           = [];
+
+    var timelineSources = videoElement.getAttribute('data-timeline-sources');
+    
+    if (timelineSources) {
+      var filenames = timelineSources.split(' ');
+      for (var j = 0, fl = filenames.length; j < fl; j++) {
+        if (filenames[j]) {
+           this.xmlDoc.push(loadXMLDoc(filenames[j]));
+        }
+      }
+    }
+
+    // Parses xml into command objects and adds them to the video manager
+    this.parse = function() {
+      function parseNode(node, attributes, manifest) {
+        var allAttributes = attributes.slice(0);
+        allAttributes.push(node.attributes);
+        var childNodes = node.childNodes;
+        if (childNodes.length < 1 || (childNodes.length === 1 && childNodes[0].nodeType === 3)) {
+          if (!manifest) {
+            self.addCommand(commands[node.nodeName].create(node.nodeName, allAttributes, node.textContent, self));
+          } else {
+            self.addManifestObject(allAttributes);
+          }
+        } else {
+          for (var i = 0; i < childNodes.length; i++) {
+            if (childNodes[i].nodeType === 1) {
+              parseNode(childNodes[i], allAttributes, manifest);
+            }
+          }
+        }
+      }
+
+      for (var j = 0, dl = self.xmlDoc.length; j < dl; j++) {
+        var x = self.xmlDoc[j].documentElement.childNodes;
+        for (var i = 0, xl = x.length; i < xl; i++) {
+          if (x[i].nodeType === 1) {
+            if (x[i].nodeName === "manifest") {
+              parseNode(x[i], [], true);
+            } else {
+              parseNode(x[i], [], false);
+            }
+          }
+        }
+      }
+    };
+
+    videoElement.addEventListener('loadedmetadata', function() {
+      self.parse();
+      self.loaded();
+      self.isLoaded = true;
+    }, false);
+
     videoElement.videoManager = this;
+
     Popcorn.addInstance(this);
     videoElement.setAttribute("ontimeupdate", "Popcorn.update(this, this.videoManager);"); 
   };
@@ -22,8 +163,8 @@
   };
 
   Popcorn.VideoManager.prototype.addManifestObject = function(manifestAttributes) {
-    var manifest = {},
-        manifestId = "";
+    var manifest = {}, manifestId = "";
+
     for (var i = 0, pl = manifestAttributes.length; i < pl; i++) {
       for (var j = 0, nl = manifestAttributes[i].length; j < nl; j++) {
         var key = manifestAttributes[i].item(j).nodeName,
@@ -44,6 +185,33 @@
 
   Popcorn.VideoManager.prototype.loaded = function() {};
   
+  Popcorn.VideoSequence = function VideoSequence(id) {
+    this.id             = id;
+    this.totalDuration  = 0;
+    this.videoManagers  = [];
+  };
+
+  Popcorn.VideoSequence.groups = {};
+
+  Popcorn.VideoSequence.prototype.add = function(videoManager) {
+    var self      = this;
+    var position  = self.videoManagers.length;
+
+    // Only allow fully loaded videos to be added to a sequence
+    (function executeAdd() {
+      if (videoManager.isLoaded) {
+        self.videoManagers[position] = videoManager;
+        self.totalDuration += videoManager.videoElement.duration;
+      } else {
+        setTimeout(function() { executeAdd(); }, 10);
+      }
+    }());
+  };
+
+  Popcorn.VideoSequence.prototype.play = function() {
+  
+  };
+
   var inactiveTarget = {};
   
   // Update is called on the video every time it's time changes.
@@ -883,148 +1051,19 @@
     };
   };
   
-  // Wrapper for accessing commands by name
-  // commands[name].create() returns a new command of type name
-  // Not sure if this is the best way; maybe it's too fancy?
-  // I liked it more than a switch, though
-  var commands = {
-    subtitle: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.SubtitleCommand(name, params, text, videoManager);
-      }
-    },
-    credits: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.CreditsCommand(name, params, text, videoManager);
-      }
-    },
-    flickr: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.FlickrCommand(name, params, text, videoManager);
-      }
-    },
-    videotag: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.TagCommand(name, params, text, videoManager);
-      }
-    },
-    location: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.MapCommand(name, params, text, videoManager);
-      }
-    },
-    footnote: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.FootnoteCommand(name, params, text, videoManager);
-      }
-    },
-    twitter: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.TwitterCommand(name, params, text, videoManager);
-      }
-    },
-    attribution: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.AttributionCommand(name, params, text, videoManager);
-      }
-    },
-    googlenews: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.GoogleNewsCommand(name, params, text, videoManager);
-      }
-    },
-    wiki: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.WikiCommand(name, params, text, videoManager);
-      }
-    },
-    lowerthird: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.LowerThirdCommand(name, params, text, videoManager);
-      }
-    },
-    seek: {
-      create: function(name, params, text, videoManager) {
-        return new Popcorn.SeekCommand(name, params, text, videoManager);
-      }
-    }
-  };
-
-  ////////////////////////////////////////////////////////////////////////////
-  // XML Parser
-  ////////////////////////////////////////////////////////////////////////////
-
-  // Parses xml into command objects and adds them to the video manager
-  var parse = function(xmlDoc, videoManager) {
-
-    var parseNode = function(node, attributes, manifest) {
-      var allAttributes = attributes.slice(0);
-      allAttributes.push(node.attributes);
-      var childNodes = node.childNodes;
-      if (childNodes.length < 1 || (childNodes.length === 1 && childNodes[0].nodeType === 3)) {
-        if (!manifest) {
-          videoManager.addCommand(commands[node.nodeName].create(node.nodeName, allAttributes, node.textContent, videoManager));
-        } else {
-          videoManager.addManifestObject(allAttributes);
-        }
-      } else {
-        for (var i = 0; i < childNodes.length; i++) {
-          if (childNodes[i].nodeType === 1) {
-            parseNode(childNodes[i], allAttributes, manifest);
-          }
-        }
-      }
-    };
-
-    for (var j = 0, dl = xmlDoc.length; j < dl; j++) {
-      var x = xmlDoc[j].documentElement.childNodes;
-      for (var i = 0, xl = x.length; i < xl; i++) {
-        if (x[i].nodeType === 1) {
-          if (x[i].nodeName === "manifest") {
-            parseNode(x[i], [], true);
-          } else {
-            parseNode(x[i], [], false);
-          }
-        }
-      }
-    }
-  };
-
-  // Loads an external xml file, and returns the xml object
-  var loadXMLDoc = function(name) {
-    var xhttp = new XMLHttpRequest();
-    if (xhttp) {
-      xhttp.open("GET", name, false);
-      xhttp.send();
-      return xhttp.responseXML;
-    } else {
-      return false;
-    }
-  };
 
   // Automatic Initialization Method
-  var init = function() {
+  function init() {
+    // Get all video tags included in the document
     var video = document.getElementsByTagName('video');
     for (var i = 0, l = video.length; i < l; i++) {
-      var videoSources = video[i].getAttribute('data-timeline-sources');
-      if (videoSources) {
-        var filenames = videoSources.split(' '),
-            xml = [];
-        for (var j=0, fl=filenames.length; j<fl; j++) {
-          if (filenames[j]) {
-            xml.push(loadXMLDoc(filenames[j]));
-          }
-        }
+      // Only create VideoManagers for video elements with a data-timeline-sources attribute
+      if (video[i].getAttribute('data-timeline-sources')) {
         var manager = new Popcorn.VideoManager(video[i]);
-        video[i].addEventListener('loadedmetadata', (function() {
-          return function() {
-            parse(xml, manager);
-            manager.loaded();
-          };
-        }()), false);
       }
     }
-  };
+  }
+
   document.addEventListener('DOMContentLoaded', init, false);
   
 }());
